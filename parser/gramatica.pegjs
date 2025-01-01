@@ -6,7 +6,7 @@
 }}
 
 gramatica
-  = _ prods:producciones+ _ {
+  = _ code:globalCode? prods:regla+ _ {
     let duplicados = ids.filter((item, index) => ids.indexOf(item) !== index);
     if (duplicados.length > 0) {
         errores.push(new ErrorReglas("Regla duplicada: " + duplicados[0]));
@@ -17,13 +17,19 @@ gramatica
     if (noEncontrados.length > 0) {
         errores.push(new ErrorReglas("Regla no encontrada: " + noEncontrados[0]));
     }
-    return prods;
+    prods[0].start = true;
+    return new n.Grammar(prods, code);
   }
 
-producciones
-  = _ id:identificador _ alias:$(literales)? _ "=" _ expr:opciones (_";")? {
+globalCode
+  = "{" before:$(. !"contains")* [ \t\n\r]* "contains" [ \t\n\r]* after:$[^}]* "}" {
+    return after ? {before, after} : {before}
+  }
+
+regla
+  = _ id:identificador _ alias:(literales)? _ "=" _ expr:opciones (_";")? {
     ids.push(id);
-    return new n.Producciones(id, expr, alias);
+    return new n.Regla(id, expr, alias);
   }
 
 opciones
@@ -32,84 +38,93 @@ opciones
   }
 
 union
-  = expr:expresion rest:(_ @expresion !(_ literales? _ "=") )* {
-    return new n.Union([expr, ...rest]);
+  = expr:parsingExpression rest:(_ @parsingExpression !(_ literales? _ "=") )* action:(_ @predicate)? {
+    const exprs = [expr, ...rest];
+    const labeledExprs = exprs
+        .filter((expr) => expr instanceof n.Pluck)
+        .filter((expr) => expr.labeledExpr.label);
+    if (labeledExprs.length > 0) {
+        action.params = labeledExprs.reduce((args, labeled) => {
+            const expr = labeled.labeledExpr.annotatedExpr.expr;
+            args[labeled.labeledExpr.label] =
+                expr instanceof n.Identificador ? expr.id : '';
+            return args;
+        }, {});
+    }
+    return new n.Union(exprs, action);
   }
 
-expresion
-  = label:$(etiqueta/varios)? _ expr:expresiones _ qty:$([?+*]/conteo)? {
-    return new n.Expresion(expr, label, qty);
+parsingExpression
+  = pluck
+  / '!' assertion:(match/predicate) {
+    return new n.NegAssertion(assertion);
+  }
+  / '&' assertion:(match/predicate) {
+    return new n.Assertion(assertion);
+  }
+  / "!." {
+    return new n.Fin();
   }
 
-etiqueta = ("@")? _ id:identificador _ ":" (varios)?
+pluck
+  = pluck:"@"? _ expr:label {
+    return new n.Pluck(expr, pluck ? true : false);
+  }
 
-varios = ("!"(!".") /"$"/"@"/"&")
+label
+  = label:(@identificador _ ":")? _ expr:annotated {
+    return new n.Label(expr, label);
+  }
 
-expresiones
+annotated
+  = text:"$"? _ expr:match _ qty:([?+*]/conteo)? {
+    return new n.Annotated(expr, qty, text ? true : false);
+  }
+
+match
   = id:identificador {
-    usos.push(id);
-    return new n.idRel(id);
+    usos.push(id)
+    return new n.Identificador(id);
   }
   / val:$literales isCase:"i"? {
-    return new n.String(val.replace(/['"]/g, ''), isCase);
+    return new n.String(val.replace(/['"]/g, ''), isCase ? true : false);
   }
-  / "(" _ opciones:opciones _ ")"{
-    return new n.grupo(opciones);
-  }
-
-  / exprs:corchetes isCase:"i"?{
-    //console.log("Corchetes", exprs);
-    return new n.Corchetes(exprs, isCase);
-
+  / "(" _ @opciones _ ")"
+  / chars:clase isCase:"i"? {
+    return new n.Clase(chars, isCase ? true : false);
   }
   / "." {
-    return new n.Any(true);
-  }
-  / "!."{
-    return new n.finCadena();
+    return new n.Punto();
   }
 
-// conteo = "|" parteconteo _ (_ delimitador )? _ "|"
+conteo
+  = "|" _ (numero / id:identificador) _ "|"
+  / "|" _ (numero / id:identificador)? _ ".." _ (numero / id2:identificador)? _ "|"
+  / "|" _ (numero / id:identificador)? _ "," _ opciones _ "|"
+  / "|" _ (numero / id:identificador)? _ ".." _ (numero / id2:identificador)? _ "," _ opciones _ "|"
 
-conteo = "|" _ (numero / id:identificador) _ "|"
-        / "|" _ (numero / id:identificador)? _ ".." _ (numero / id2:identificador)? _ "|"
-        / "|" _ (numero / id:identificador)? _ "," _ opciones _ "|"
-        / "|" _ (numero / id:identificador)? _ ".." _ (numero / id2:identificador)? _ "," _ opciones _ "|"
+predicate
+  = "{" [ \t\n\r]* returnType:predicateReturnType code:$[^}]* "}" {
+    return new n.Predicate(returnType, code, {})
+  }
 
-// parteconteo = identificador
-//             / [0-9]? _ ".." _ [0-9]?
-// 			/ [0-9]
+predicateReturnType
+  = t:$(. !"::")+ [ \t\n\r]* "::" [ \t\n\r]* "res" {
+    return t.trim();
+  }
 
-// delimitador =  "," _ expresion
+clase
+  = "[" @contenidoClase+ "]"
 
-// Regla principal que analiza corchetes con contenido
-corchetes
-    = "[" contenido:(rango / contenido)+ "]" {
-        return contenido;
-    }
+contenidoClase
+  = bottom:$caracter "-" top:$caracter {
+    return new n.Rango(bottom, top);
+  }
+  / $caracter
 
-// Regla para validar un rango como [A-Z]
-rango
-    = inicio:$caracter "-" fin:$caracter {
-        return new  n.rango(inicio, fin);
-    }
-
-// Regla para caracteres individuales
 caracter
-    = [a-zA-Z0-9_ ] 
-
-// Coincide con cualquier contenido que no incluya "]"
-contenido
-    = contenido: (corchete / @$texto){
-        return new n.literalRango(contenido);
-    }
-
-corchete
-    = "[" contenido "]"
-
-texto
-    = "\\" escape
-    /[^\[\]]
+  = [^\[\]\\]
+  / "\\" .
 
 literales
   = '"' @stringDobleComilla* '"'
@@ -144,14 +159,11 @@ secuenciaFinLinea = "\r\n" / "\n" / "\r" / "\u2028" / "\u2029"
 //     "\"" [^"]* "\""
 //     / "'" [^']* "'"
     
-
 numero = [0-9]+
 
 identificador = [_a-z]i[_a-z0-9]i* { return text() }
 
-
 _ = (Comentarios /[ \t\n\r])*
-
 
 Comentarios = 
     "//" [^\n]* 
